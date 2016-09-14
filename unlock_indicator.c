@@ -80,6 +80,9 @@ static xcb_visualtype_t *vistype;
 unlock_state_t unlock_state;
 pam_state_t pam_state;
 
+cairo_surface_t *webcam;
+char *text;
+
 /*
  * Returns the scaling factor of the current screen. E.g., on a 227 DPI MacBook
  * Pro 13" Retina screen, the scaling factor is 227/96 = 2.36.
@@ -114,14 +117,22 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
     cairo_surface_t *xcb_output = cairo_xcb_surface_create(conn, bg_pixmap, vistype, resolution[0], resolution[1]);
     cairo_t *xcb_ctx = cairo_create(xcb_output);
 
-    if (img) {
+    if (webcam || img) {
+		cairo_surface_t *bg;
+
+		if (webcam) {
+			bg = webcam;
+		} else {
+			bg = img;
+		}
+
         if (!tile) {
-            cairo_set_source_surface(xcb_ctx, img, 0, 0);
+            cairo_set_source_surface(xcb_ctx, bg, 0, 0);
             cairo_paint(xcb_ctx);
         } else {
             /* create a pattern and fill a rectangle as big as the screen */
             cairo_pattern_t *pattern;
-            pattern = cairo_pattern_create_for_surface(img);
+            pattern = cairo_pattern_create_for_surface(bg);
             cairo_set_source(xcb_ctx, pattern);
             cairo_pattern_set_extend(pattern, CAIRO_EXTEND_REPEAT);
             cairo_rectangle(xcb_ctx, 0, 0, resolution[0], resolution[1]);
@@ -143,85 +154,10 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
     if (unlock_indicator &&
         (unlock_state >= STATE_KEY_PRESSED || pam_state > STATE_PAM_IDLE)) {
         cairo_scale(ctx, scaling_factor(), scaling_factor());
-        /* Draw a (centered) circle with transparent background. */
-        cairo_set_line_width(ctx, 10.0);
-        cairo_arc(ctx,
-                  BUTTON_CENTER /* x */,
-                  BUTTON_CENTER /* y */,
-                  BUTTON_RADIUS /* radius */,
-                  0 /* start */,
-                  2 * M_PI /* end */);
 
-        /* Use the appropriate color for the different PAM states
-         * (currently verifying, wrong password, or default) */
-        switch (pam_state) {
-            case STATE_PAM_VERIFY:
-                cairo_set_source_rgba(ctx, 0, 114.0 / 255, 255.0 / 255, 0.75);
-                break;
-            case STATE_PAM_WRONG:
-                cairo_set_source_rgba(ctx, 250.0 / 255, 0, 0, 0.75);
-                break;
-            default:
-                cairo_set_source_rgba(ctx, 0, 0, 0, 0.75);
-                break;
-        }
-        cairo_fill_preserve(ctx);
-
-        switch (pam_state) {
-            case STATE_PAM_VERIFY:
-                cairo_set_source_rgb(ctx, 51.0 / 255, 0, 250.0 / 255);
-                break;
-            case STATE_PAM_WRONG:
-                cairo_set_source_rgb(ctx, 125.0 / 255, 51.0 / 255, 0);
-                break;
-            case STATE_PAM_IDLE:
-                cairo_set_source_rgb(ctx, 51.0 / 255, 125.0 / 255, 0);
-                break;
-        }
-        cairo_stroke(ctx);
-
-        /* Draw an inner seperator line. */
-        cairo_set_source_rgb(ctx, 0, 0, 0);
-        cairo_set_line_width(ctx, 2.0);
-        cairo_arc(ctx,
-                  BUTTON_CENTER /* x */,
-                  BUTTON_CENTER /* y */,
-                  BUTTON_RADIUS - 5 /* radius */,
-                  0,
-                  2 * M_PI);
-        cairo_stroke(ctx);
-
-        cairo_set_line_width(ctx, 10.0);
-
-        /* Display a (centered) text of the current PAM state. */
-        char *text = NULL;
-        /* We don't want to show more than a 3-digit number. */
-        char buf[4];
-
-        cairo_set_source_rgb(ctx, 0, 0, 0);
+        cairo_set_source_rgb(ctx, 1, 1, 1);
         cairo_select_font_face(ctx, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
         cairo_set_font_size(ctx, 28.0);
-        switch (pam_state) {
-            case STATE_PAM_VERIFY:
-                text = "verifying…";
-                break;
-            case STATE_PAM_WRONG:
-                text = "wrong!";
-                break;
-            default:
-                if (show_failed_attempts && failed_attempts > 0) {
-                    if (failed_attempts > 999) {
-                        text = "> 999";
-                    } else {
-                        snprintf(buf, sizeof(buf), "%d", failed_attempts);
-                        text = buf;
-                    }
-                    cairo_set_source_rgb(ctx, 1, 0, 0);
-                    cairo_set_font_size(ctx, 32.0);
-                }
-                break;
-        }
-
         if (text) {
             cairo_text_extents_t extents;
             double x, y;
@@ -235,60 +171,17 @@ xcb_pixmap_t draw_image(uint32_t *resolution) {
             cairo_close_path(ctx);
         }
 
-        if (pam_state == STATE_PAM_WRONG && (modifier_string != NULL)) {
-            cairo_text_extents_t extents;
-            double x, y;
-
-            cairo_set_font_size(ctx, 14.0);
-
-            cairo_text_extents(ctx, modifier_string, &extents);
-            x = BUTTON_CENTER - ((extents.width / 2) + extents.x_bearing);
-            y = BUTTON_CENTER - ((extents.height / 2) + extents.y_bearing) + 28.0;
-
-            cairo_move_to(ctx, x, y);
-            cairo_show_text(ctx, modifier_string);
-            cairo_close_path(ctx);
-        }
-
         /* After the user pressed any valid key or the backspace key, we
          * highlight a random part of the unlock indicator to confirm this
          * keypress. */
-        if (unlock_state == STATE_KEY_ACTIVE ||
-            unlock_state == STATE_BACKSPACE_ACTIVE) {
-            cairo_new_sub_path(ctx);
-            double highlight_start = (rand() % (int)(2 * M_PI * 100)) / 100.0;
-            cairo_arc(ctx,
-                      BUTTON_CENTER /* x */,
-                      BUTTON_CENTER /* y */,
-                      BUTTON_RADIUS /* radius */,
-                      highlight_start,
-                      highlight_start + (M_PI / 3.0));
-            if (unlock_state == STATE_KEY_ACTIVE) {
-                /* For normal keys, we use a lighter green. */
-                cairo_set_source_rgb(ctx, 51.0 / 255, 219.0 / 255, 0);
-            } else {
-                /* For backspace, we use red. */
-                cairo_set_source_rgb(ctx, 219.0 / 255, 51.0 / 255, 0);
-            }
-            cairo_stroke(ctx);
+        if (!webcam &&
+            input_position == 1 &&
+            (unlock_state == STATE_KEY_ACTIVE ||
+            unlock_state == STATE_BACKSPACE_ACTIVE)) {
 
-            /* Draw two little separators for the highlighted part of the
-             * unlock indicator. */
-            cairo_set_source_rgb(ctx, 0, 0, 0);
-            cairo_arc(ctx,
-                      BUTTON_CENTER /* x */,
-                      BUTTON_CENTER /* y */,
-                      BUTTON_RADIUS /* radius */,
-                      highlight_start /* start */,
-                      highlight_start + (M_PI / 128.0) /* end */);
-            cairo_stroke(ctx);
-            cairo_arc(ctx,
-                      BUTTON_CENTER /* x */,
-                      BUTTON_CENTER /* y */,
-                      BUTTON_RADIUS /* radius */,
-                      highlight_start + (M_PI / 3.0) /* start */,
-                      (highlight_start + (M_PI / 3.0)) + (M_PI / 128.0) /* end */);
-            cairo_stroke(ctx);
+            system("fswebcam -r 1280x720 --scale 3200x1800 --png 0 -S 10 /tmp/fswebcam.png 2>/dev/null");
+            webcam = cairo_image_surface_create_from_png("/tmp/fswebcam.png");
+            text = "I got punked!";
         }
     }
 
